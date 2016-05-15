@@ -6,6 +6,8 @@ require 'ostruct'
 require 'csv'
 require 'pp'
 
+STDOUT.sync = true
+
 o = OpenStruct.new
 o.username = nil
 o.password = nil
@@ -91,6 +93,7 @@ say "Starting searches"
 
 # Print a header
 r = CSV::Row.new([],[],true)
+r << "date"
 r << "ov_time"
 r << "ov_stops"
 r << "ov_duration"
@@ -155,7 +158,7 @@ while srch_date < o.end
     Watir::Wait.until { @b.div(class: "loadingbanner").exists? }
     Watir::Wait.until { !@b.div(class: "loadingbanner").exists? }
 
-    # Kinda hacky, but whatevs
+    # Kinda hacky, but whatevs. Alt, I think the real target is div#block #blockUI (or #blockOverlay?)
     Watir::Wait.until do
       @b.div(id: "flighttables").exists? ||
         (@b.div(id: "vacancy_dateoverview").exists? && @b.div(id: "vacancy_dateoverview").elements.count > 0) ||
@@ -172,6 +175,7 @@ while srch_date < o.end
         Watir::Wait.until { !@b.div(class: "icon loading").exists? }
 
         # Get the overview of the flight
+        r << ["date", srch_date]
         r << ["ov_time", tr.tds[1].text]
         r << ["ov_stops", tr.tds[2].text]
         r << ["ov_duration", tr.tds[3].text]
@@ -217,4 +221,4 @@ while srch_date < o.end
 end
 
 say "Search complete"
-browser.close
+@b.close
