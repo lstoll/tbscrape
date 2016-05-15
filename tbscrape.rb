@@ -167,6 +167,7 @@ while srch_date < o.end
 
     # Only written if we have flights
     if @b.div(id: "flighttables").exists?
+      say "Flight(s) found #{o.from} to #{o.to} on #{srch_date}"
       @b.trs(class: "flightrow").each_with_index do |tr,idx|
         r = CSV::Row.new([],[])
         tr.td(class: "flightdetailstoggle").click
