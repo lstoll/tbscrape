@@ -25,11 +25,11 @@ opt_parser = OptionParser.new do |opts|
     o.password = p
   end
 
-  opts.on("-f", "--from SEARCH", "From airport, airberlin search. First will be selected") do |f|
+  opts.on("-f", "--from SEARCH[,SEARCH]", "From airport, airberlin search. First will be selected. Can be comma delimited list") do |f|
     o.from = f
   end
   # whatever
-  opts.on("-t", "--to SEARCH", "To airport, airberlin search. First will be selected") do |t|
+  opts.on("-t", "--to SEARCH[,SEARCH]", "To airport, airberlin search. First will be selected. Can be comma delimited list") do |t|
     o.to = t
   end
 
@@ -66,6 +66,135 @@ end
 
 SEARCH_PAGE = "http://www.airberlin.com/site/abflugplan.php?LANG=eng&woher=miles&ab_source=en_site_tb_partner_index_php_cid3_AA_redeem&ab_medium=website&ab_campaign=tb-praemienflug&ab_content=button_top"
 
+def searcher(from, to, start, ennd)
+  srch_date = start
+
+  # Make sure no more loading
+  Watir::Wait.until { !@b.div(class: "loadingbanner").exists? }
+  # And wait a little more for unknown thing loading
+  sleep 3
+
+  frm = @b.form(id: "flightSearchForm")
+
+  # Departure
+  frm.text_field(id: "departure").set(from)
+  dept_div = @b.div(class: "routing").divs(xpath: './*').first
+  dept_div.div(class: "fullsuggest-open").wait_until_present
+  if dept_div.div(class: "suggestcontainer").divs.size < 1
+    fatal("No suggestions for departure")
+  end
+  dept_div.div(class: "suggestcontainer").divs.first.click
+
+  # Destination
+  frm.text_field(id: "destination").set(to)
+  dest_div = @b.div(class: "routing").divs(xpath: './*').last
+  dest_div.div(class: "fullsuggest-open").wait_until_present
+  if dest_div.div(class: "suggestcontainer").divs.size < 1
+    fatal("No suggestions for departure")
+  end
+  dest_div.div(class: "suggestcontainer").divs.first.click
+
+  retries = 0
+  while srch_date < ennd
+    say "Starting search from #{from} to #{to} on #{srch_date}"
+
+    retries = 0
+    begin
+      # One way
+      @b.checkbox(id: "oneway").set
+
+      # Date. format as yyyy-mm-dd
+      @b.text_field(id: "outbounddate").click
+      date_div = @b.div(id: "outbound-date")
+      date_div.wait_until_present
+      date_div.select(:class, 'ui-datepicker-new-year').select_value(srch_date.year)
+      date_div.select(:class, 'ui-datepicker-new-month').select(srch_date.strftime("%B"))
+      date_div.table(:class, 'ui-datepicker').link(text: srch_date.day.to_s).click
+
+      # GOGO
+      @b.button(:text =>"Search for flights").click
+
+      # Wait for loading banner to come and go
+      Watir::Wait.until { @b.div(class: "loadingbanner").exists? }
+      Watir::Wait.until { !@b.div(class: "loadingbanner").exists? }
+
+      # Kinda hacky, but whatevs. Alt, I think the real target is div#block #blockUI (or #blockOverlay?)
+      Watir::Wait.until do
+        @b.div(id: "flighttables").exists? ||
+          (@b.div(id: "vacancy_dateoverview").exists? && @b.div(id: "vacancy_dateoverview").elements.count > 0) ||
+          (@b.div(id: "vacancy_error").exists? && @b.div(id: "vacancy_error").elements.count > 0)
+      end
+
+      # Only written if we have flights
+      if @b.div(id: "flighttables").exists?
+        say "Flight(s) found #{from} to #{to} on #{srch_date}"
+        @b.trs(class: "flightrow").each_with_index do |tr,idx|
+          r = CSV::Row.new([],[])
+          tr.td(class: "flightdetailstoggle").click
+
+          Watir::Wait.until { @b.div(class: "icon loading").exists? }
+          Watir::Wait.until { !@b.div(class: "icon loading").exists? }
+
+          # Get the overview of the flight
+          r << ["date", srch_date]
+          r << ["ov_time", tr.tds[1].text]
+          r << ["ov_stops", tr.tds[2].text]
+          r << ["ov_duration", tr.tds[3].text]
+          r << ["ov_miles", tr.tds[4].text]
+          r << ["ov_money", @b.div(id: "vacancy_priceoverview").table(class: "total").trs[1].tds[0].text]
+          r << ["ov_rem_seats", @b.div(class: "remainingseats").text.split("\n").last]
+          # Get the legs
+          @b.trs(class: "flightdetails")[idx].tbody.trs.each_with_index do |dtr,didx|
+            r << ["depart_#{didx}", dtr.tds[1].text]
+            r << ["arrive_#{didx}", dtr.tds[2].text]
+            r << ["flight_#{didx}", dtr.tds[3].text]
+            r << ["carrier_#{didx}", dtr.tds[4].text]
+          end
+          puts r
+        end
+        # No flights, but others nearby. Maybe can optimize skipping dates with this in the future?
+      elsif @b.div(id: "vacancy_dateoverview").exists? && @b.div(id: "vacancy_dateoverview").elements.count > 0
+        say "No flights found from #{from} to #{to} on #{srch_date}, but flights in the vincinity"
+        # This is nothing found, with nothing in the timeframe
+        # TODO - confirm that this is the same for "invalid route" as "nothing near date"?
+      elsif @b.div(id: "vacancy_error").exists? && @b.div(id: "vacancy_error").elements.count > 0
+        say "No flights found from #{from} to #{to} on #{srch_date}"
+      else
+        # Shouldn't hit this anymore because of the wait above
+        fatal "Unknown error page loaded"
+      end
+
+      # Pop the search box open if it isn't already
+      @b.link(id: "changeSearch").click unless @b.div(class: "routing").visible?
+    rescue Exception => e
+      if retries > 5
+        fatal "Too many retries on the same page"
+      end
+      say "Error occured: #{e}. Re-loading search page and trying again"
+      @b.goto(SEARCH_PAGE)
+      retries += 1
+      next
+    end
+
+    # Move on to the next day, reset retries
+    srch_date += 1
+    retries = 0
+  end
+end
+
+froms = o.from.split(",")
+tos = o.to.split(",")
+pairs = []
+pairsText = []
+froms.each do |fr|
+  tos.each do |to|
+    pairs << [fr, to]
+    pairsText << "#{fr}-#{to}"
+  end
+end
+
+say "Search pairs: #{pairsText.join(", ")}"
+
 # Log in
 say "Attempting to log in"
 @b.goto("https://www.airberlin.com")
@@ -81,15 +210,6 @@ if !@b.button(:text =>"Log-out").exists?
 end
 
 say "Logged in. Starting flight search"
-# Get the flight search page loaded.
-# TODO - this will be the date loop point
-
-say "Loading search page"
-@b.goto(SEARCH_PAGE)
-
-srch_date = o.start
-
-say "Starting searches"
 
 # Print a header
 r = CSV::Row.new([],[],true)
@@ -109,116 +229,12 @@ r << "ov_rem_seats"
 end
 STDOUT.puts r
 
-# Make sure no more loading
-Watir::Wait.until { !@b.div(class: "loadingbanner").exists? }
-# And wait a little more for unknown thing loading
-sleep 3
+say "Loading search page"
+@b.goto(SEARCH_PAGE)
 
-frm = @b.form(id: "flightSearchForm")
-
-# Departure
-frm.text_field(id: "departure").set(o.from)
-dept_div = @b.div(class: "routing").divs(xpath: './*').first
-dept_div.div(class: "fullsuggest-open").wait_until_present
-if dept_div.div(class: "suggestcontainer").divs.size < 1
-  fatal("No suggestions for departure")
-end
-dept_div.div(class: "suggestcontainer").divs.first.click
-
-# Destination
-frm.text_field(id: "destination").set(o.to)
-dest_div = @b.div(class: "routing").divs(xpath: './*').last
-dest_div.div(class: "fullsuggest-open").wait_until_present
-if dest_div.div(class: "suggestcontainer").divs.size < 1
-  fatal("No suggestions for departure")
-end
-dest_div.div(class: "suggestcontainer").divs.first.click
-
-retries = 0
-while srch_date < o.end
-  say "Starting search from #{o.from} to #{o.to} on #{srch_date}"
-
-  retries = 0
-  begin
-    # One way
-    @b.checkbox(id: "oneway").set
-
-    # Date. format as yyyy-mm-dd
-    @b.text_field(id: "outbounddate").click
-    date_div = @b.div(id: "outbound-date")
-    date_div.wait_until_present
-    date_div.select(:class, 'ui-datepicker-new-year').select_value(srch_date.year)
-    date_div.select(:class, 'ui-datepicker-new-month').select(srch_date.strftime("%B"))
-    date_div.table(:class, 'ui-datepicker').link(text: srch_date.day.to_s).click
-
-    # GOGO
-    @b.button(:text =>"Search for flights").click
-
-    # Wait for loading banner to come and go
-    Watir::Wait.until { @b.div(class: "loadingbanner").exists? }
-    Watir::Wait.until { !@b.div(class: "loadingbanner").exists? }
-
-    # Kinda hacky, but whatevs. Alt, I think the real target is div#block #blockUI (or #blockOverlay?)
-    Watir::Wait.until do
-      @b.div(id: "flighttables").exists? ||
-        (@b.div(id: "vacancy_dateoverview").exists? && @b.div(id: "vacancy_dateoverview").elements.count > 0) ||
-        (@b.div(id: "vacancy_error").exists? && @b.div(id: "vacancy_error").elements.count > 0)
-    end
-
-    # Only written if we have flights
-    if @b.div(id: "flighttables").exists?
-      say "Flight(s) found #{o.from} to #{o.to} on #{srch_date}"
-      @b.trs(class: "flightrow").each_with_index do |tr,idx|
-        r = CSV::Row.new([],[])
-        tr.td(class: "flightdetailstoggle").click
-
-        Watir::Wait.until { @b.div(class: "icon loading").exists? }
-        Watir::Wait.until { !@b.div(class: "icon loading").exists? }
-
-        # Get the overview of the flight
-        r << ["date", srch_date]
-        r << ["ov_time", tr.tds[1].text]
-        r << ["ov_stops", tr.tds[2].text]
-        r << ["ov_duration", tr.tds[3].text]
-        r << ["ov_miles", tr.tds[4].text]
-        r << ["ov_money", @b.div(id: "vacancy_priceoverview").table(class: "total").trs[1].tds[0].text]
-        r << ["ov_rem_seats", @b.div(class: "remainingseats").text.split("\n").last]
-        # Get the legs
-        @b.trs(class: "flightdetails")[idx].tbody.trs.each_with_index do |dtr,didx|
-          r << ["depart_#{didx}", dtr.tds[1].text]
-          r << ["arrive_#{didx}", dtr.tds[2].text]
-          r << ["flight_#{didx}", dtr.tds[3].text]
-          r << ["carrier_#{didx}", dtr.tds[4].text]
-        end
-        puts r
-      end
-      # No flights, but others nearby. Maybe can optimize skipping dates with this in the future?
-    elsif @b.div(id: "vacancy_dateoverview").exists? && @b.div(id: "vacancy_dateoverview").elements.count > 0
-      say "No flights found from #{o.from} to #{o.to} on #{srch_date}, but flights in the vincinity"
-      # This is nothing found, with nothing in the timeframe
-      # TODO - confirm that this is the same for "invalid route" as "nothing near date"?
-    elsif @b.div(id: "vacancy_error").exists? && @b.div(id: "vacancy_error").elements.count > 0
-      say "No flights found from #{o.from} to #{o.to} on #{srch_date}"
-    else
-      # Shouldn't hit this anymore because of the wait above
-      fatal "Unknown error page loaded"
-    end
-
-    # Pop the search box open if it isn't already
-    @b.link(id: "changeSearch").click unless @b.div(class: "routing").visible?
-  rescue Exception => e
-    if retries > 5
-      fatal "Too many retries on the same page"
-    end
-    say "Error occured: #{e}. Re-loading search page and trying again"
-    @b.goto(SEARCH_PAGE)
-    retries += 1
-    next
-  end
-
-  # Move on to the next day, reset retries
-  srch_date += 1
-  retries = 0
+pairs.each do |p|
+  say "Starting searches for #{p[0]} to #{p[1]}"
+  searcher(p[0], p[1], o.start, o.end)
 end
 
 say "Search complete"
