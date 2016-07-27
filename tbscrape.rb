@@ -50,7 +50,7 @@ unless missing.empty?
 end
 
 # Firefox less effort
-@b = Watir::Browser.new :firefox
+@b = Watir::Browser.new :marionette
 trap("SIGINT") { @b.close;exit }
 
 def say(msg)
@@ -142,7 +142,11 @@ def searcher(from, to, start, ennd)
           r << ["ov_duration", tr.tds[3].text]
           r << ["ov_miles", tr.tds[4].text]
           r << ["ov_money", @b.div(id: "vacancy_priceoverview").table(class: "total").trs[1].tds[0].text]
-          r << ["ov_rem_seats", @b.div(class: "remainingseats").text.split("\n").last]
+          if @b.div(class: "remainingseats").exists?
+            r << ["ov_rem_seats", @b.div(class: "remainingseats").text.split("\n").last]
+          else
+            r << ["ov_rem_seats", ""]
+          end
           # Get the legs
           @b.trs(class: "flightdetails")[idx].tbody.trs.each_with_index do |dtr,didx|
             r << ["depart_#{didx}", dtr.tds[1].text]
